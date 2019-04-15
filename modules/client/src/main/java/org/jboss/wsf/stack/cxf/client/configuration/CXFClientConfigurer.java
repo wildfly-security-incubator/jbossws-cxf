@@ -21,9 +21,11 @@
  */
 package org.jboss.wsf.stack.cxf.client.configuration;
 
+import java.net.URISyntaxException;
 import java.util.Map;
 import java.util.Set;
 
+import javax.xml.ws.BindingProvider;
 import javax.xml.ws.Dispatch;
 
 import org.apache.cxf.endpoint.Client;
@@ -35,12 +37,15 @@ import org.jboss.ws.common.configuration.ConfigHelper;
 import org.jboss.wsf.spi.classloading.ClassLoaderProvider;
 import org.jboss.wsf.spi.metadata.config.ClientConfig;
 import org.jboss.wsf.spi.security.JASPIAuthenticationProvider;
+import org.jboss.wsf.spi.security.WildflyClientSecurityConfigProvider;
 import org.jboss.wsf.stack.cxf.client.Constants;
 import org.jboss.wsf.stack.cxf.i18n.Loggers;
 
+import static org.jboss.ws.common.Messages.MESSAGES;
+
 /**
  * CXF extension of common ClientConfigurer
- * 
+ *
  * @author alessio.soldano@jboss.com
  * @since 25-Jul-2012
  *
@@ -48,28 +53,39 @@ import org.jboss.wsf.stack.cxf.i18n.Loggers;
 public class CXFClientConfigurer extends ConfigHelper
 {
    private static final String JBOSSWS_CXF_CLIENT_CONF_PROPS = "jbossws.cxf.client.conf.props";
-   
+
    @Override
    public void setConfigProperties(Object client, String configFile, String configName) {
       Class<?> clazz = !(client instanceof Dispatch) ? client.getClass() : null;
       ClientConfig config = readConfig(configFile, configName, clazz);
-      setConfigProperties(client, config);
-   }
-   
-   protected void setConfigProperties(Object client, ClientConfig config) {
-      Client cxfClient;
-      if (client instanceof DispatchImpl<?>) {
-         cxfClient = ((DispatchImpl<?>)client).getClient();
-      } else {
-         cxfClient = ClientProxy.getClient(client);
+
+      Client cxfClient = asCxfClient(client);
+
+      if (config == null) {
+         config = getWildflyClientConfig((BindingProvider) client);
+         if (config != null && config.getProperties() != null) {
+            cxfClient.getRequestContext().putAll(config.getProperties());
+         }
       }
+      
+      if (config == null) {
+         throw MESSAGES.configurationNotFound(configName);
+      }
+      setConfigProperties(cxfClient, config);
+   }
+
+   protected void setConfigProperties(Object client, ClientConfig config) {
+     setConfigProperties(asCxfClient(client), config);
+   }
+
+   protected void setConfigProperties(Client cxfClient, ClientConfig config) {
       cleanupPreviousProps(cxfClient);
       Map<String, String> props = config.getProperties();
       if (props != null && !props.isEmpty()) {
          savePropList(cxfClient, props);
       }
       setConfigProperties(cxfClient, props);
-      
+
       //config jaspi
       JASPIAuthenticationProvider japsiProvider = (JASPIAuthenticationProvider) ServiceLoader.loadService(
             JASPIAuthenticationProvider.class.getName(), null, ClassLoaderProvider.getDefaultProvider().getServerIntegrationClassLoader());
@@ -82,18 +98,38 @@ public class CXFClientConfigurer extends ConfigHelper
          Loggers.SECURITY_LOGGER.cannotFindJaspiClasses();
       }
    }
-   
+
+   private Client asCxfClient(Object client){
+      if (client instanceof DispatchImpl<?>) {
+         return ((DispatchImpl<?>)client).getClient();
+      } else {
+         return ClientProxy.getClient(client);
+      }
+   }
+
+   private ClientConfig getWildflyClientConfig(BindingProvider port) {
+      java.util.ServiceLoader<WildflyClientSecurityConfigProvider> loader = java.util.ServiceLoader.load(WildflyClientSecurityConfigProvider.class);
+      if (loader.iterator().hasNext()) {
+         try {
+            return WildflyClientConfigHelper.getClientConfig(loader.iterator().next(), port);
+         } catch (URISyntaxException e) {
+            throw MESSAGES.couldNotReadConfigFile("wildfly-config.xml");
+         }
+      }
+      return null;
+   }
+
    public void setConfigProperties(Client client, Map<String, String> properties) {
       client.getEndpoint().putAll(properties);
       InterceptorUtils.addInterceptors(client, properties);
       FeatureUtils.addFeatures(client, client.getBus(), properties);
    }
-   
+
    private void savePropList(Client client, Map<String, String> props) {
       final Set<String> keys = props.keySet();
       client.getEndpoint().put(JBOSSWS_CXF_CLIENT_CONF_PROPS, (String[])keys.toArray(new String[keys.size()]));
    }
-   
+
    private void cleanupPreviousProps(Client client) {
       Endpoint ep = client.getEndpoint();
       String[] previousProps = (String[])ep.get(JBOSSWS_CXF_CLIENT_CONF_PROPS);
